@@ -1,7 +1,8 @@
 import os
 import argparse
 from pathlib import Path 
-import torch.backends.cudnn as cudnn
+import torch.backends.cudnn as cudnn 
+import numpy as np 
 import torch 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -9,6 +10,8 @@ from model import ViDModel
 from utils import build_dataset 
 from engine import train_one_epoch, evaluate
 from misc import NativeScalerWithGradNormCount as NativeScaler
+from misc import init_distributed_mode, get_rank, get_world_size 
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('ViD fine-tuning for image classification', add_help=False)
@@ -128,17 +131,32 @@ def get_args_parser():
 
 
 def main(args): 
+    init_distributed_mode(args)
     cudnn.benchmark = True 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+    device = torch.device(args.device)
 
-    os.makedirs(args.log_dir, exist_ok=True)
-    log_writer = SummaryWriter(log_dir=args.log_dir)
+    # fix the seed for reproducibility
+    seed = args.seed + get_rank()
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
     dataset_train = build_dataset(is_train=True, args=args)
     dataset_val = build_dataset(is_train=False, args=args)
-
-    sampler_train = torch.utils.data.RandomSampler(dataset_train)
+    num_tasks = get_world_size()
+    global_rank = get_rank()
+    sampler_train = torch.utils.data.DistributedSampler(
+        dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+    )
+    print("Sampler_train = %s" % str(sampler_train)) 
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+
+
+    if global_rank == 0 and args.log_dir is not None and not args.eval:
+        os.makedirs(args.log_dir, exist_ok=True)
+        log_writer = SummaryWriter(log_dir=args.log_dir)
+    else:
+        log_writer = None 
+
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
@@ -158,10 +176,13 @@ def main(args):
 
 
     model = ViDModel(sd_model_path='./ckpt', device=device,)
-    # model = model.to(device) 
+    if args.distributed:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model_without_ddp = model.module
+    
     mixup_fn = None
 
-    optimizer = torch.optim.AdamW(model.projection.parameters(), lr=args.lr) 
+    optimizer = torch.optim.AdamW(model_without_ddp.projection.parameters(), lr=args.lr) 
     criterion = torch.nn.CrossEntropyLoss() 
     loss_scaler = NativeScaler()
 
