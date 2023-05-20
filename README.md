@@ -10,5 +10,5 @@ We only train the linear network on the ImageNet-1k and evaluate the performance
   | ViD | 60.2 | 
 
 
-
+After search for literatures, we think that U-Net structure is not suitable for image classification, and more exploration for segmentation is deserved. 
 
